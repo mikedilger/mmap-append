@@ -78,7 +78,7 @@ impl MmapAppend {
     /// This will return an error if there is not enough space.
     ///
     /// This may panic if the mutex is poisoned. If our code is not buggy, it will never happen.
-    pub fn append<F>(&self, len: usize, writer: F) -> Result<()>
+    pub fn append<F>(&self, len: usize, writer: F) -> Result<usize>
     where
         F: FnOnce(&mut [u8]),
     {
@@ -95,7 +95,7 @@ impl MmapAppend {
             unsafe { slice::from_raw_parts_mut(inner.unsafe_mut_ptr(), inner.len()) };
 
         // Read the end marker
-        let mut end = usize::from_le_bytes(slice[0..u].try_into().unwrap());
+        let end = usize::from_le_bytes(slice[0..u].try_into().unwrap());
 
         // Check available space
         if end + len > inner.len() {
@@ -106,10 +106,10 @@ impl MmapAppend {
         writer(&mut slice[end..end + len]);
 
         // Overwrite the end marker
-        end += len;
-        slice[0..u].copy_from_slice(&end.to_le_bytes());
+        let newend = end + len;
+        slice[0..u].copy_from_slice(&newend.to_le_bytes());
 
-        Ok(())
+        Ok(end)
     }
 
     /// Resize the map. The caller is responsible for ensuring the file is long enough.
