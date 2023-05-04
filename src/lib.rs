@@ -69,7 +69,9 @@ impl MmapAppend {
     /// This will return an error if there is not enough space.
     ///
     /// This may panic if the mutex is poisoned. If our code is not buggy, it will never happen.
-    pub fn append(&self, data: &[u8]) -> Result<()> {
+    pub fn append<F>(&self, len: usize, writer: F) -> Result<()>
+    where F: FnOnce(&mut [u8])
+    {
         // Wait for and acquire the append lock
         let _guard = self.append_lock.lock().unwrap();
 
@@ -87,15 +89,15 @@ impl MmapAppend {
         let mut end = usize::from_le_bytes(slice[0..u].try_into().unwrap());
 
         // Check available space
-        if end + data.len() > inner.len() {
+        if end + len > inner.len() {
             return Err(io::Error::new(io::ErrorKind::Other, "Out of space"));
         }
 
         // Append
-        slice[end..end + data.len()].copy_from_slice(data);
+        writer(&mut slice[end..end + len]);
 
         // Overwrite the end marker
-        end += data.len();
+        end += len;
         slice[0..u].copy_from_slice(&end.to_le_bytes());
 
         Ok(())
@@ -258,17 +260,20 @@ mod test {
 
         // Not enough space
         assert!(
-            mmap.append(&thirty_two_bytes).is_err()
+            mmap.append(thirty_two_bytes.len(),
+                        |s: &mut [u8]| s.copy_from_slice(&thirty_two_bytes)).is_err()
         );
 
         // Resize
         mmap.resize(128).unwrap();
 
-        mmap.append(&thirty_two_bytes).unwrap();
+        mmap.append(thirty_two_bytes.len(),
+                    |s: &mut [u8]| s.copy_from_slice(&thirty_two_bytes)).unwrap();
 
         assert_eq!(mmap.get_end(), 32 + std::mem::size_of::<usize>());
 
-        mmap.append(&thirty_two_bytes).unwrap();
+        mmap.append(thirty_two_bytes.len(),
+                    |s: &mut [u8]| s.copy_from_slice(&thirty_two_bytes)).unwrap();
 
         assert_eq!(mmap.get_end(), 32 + 32 + std::mem::size_of::<usize>());
     }
