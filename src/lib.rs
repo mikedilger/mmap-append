@@ -15,6 +15,12 @@ use std::sync::{Mutex, RwLock};
 
 /// A handle to an append-only memory mapped buffer.
 ///
+/// Dereferencing this gives a `&[u8]` array of bytes which consists only of the
+/// bytes previously appended, not the entire unused space.
+///
+/// There will be an area the size of a usize at the start of the file which is
+/// used internally to record where the written content ends.
+///
 /// Only one writer may append at a time (the other writers will spin-wait). Readers are not
 /// blocked while an append is taking place.
 pub struct MmapAppend {
@@ -27,7 +33,7 @@ pub struct MmapAppend {
 }
 
 impl MmapAppend {
-    /// Creates Mmaps the `file` returning an MmapAppend object.
+    /// Creates Mmaps the `file` returning an MmapAppend object. The entire file will be mapped.
     ///
     /// If `initialize` is true, it writes the initial end marker setting the end of the
     /// data to right after the end marker.
@@ -95,7 +101,7 @@ impl MmapAppend {
         Ok(())
     }
 
-    /// Resize the map.
+    /// Resize the map. The caller is responsible for ensuring the file is long enough.
     ///
     /// This may return OS errors
     ///
@@ -169,7 +175,7 @@ impl Deref for MmapAppend {
     #[inline]
     fn deref(&self) -> &[u8] {
         let inner = self.inner.read().unwrap();
-        unsafe { slice::from_raw_parts(inner.ptr(), inner.len()) }
+        unsafe { slice::from_raw_parts(inner.ptr(), self.get_end()) }
     }
 }
 
@@ -241,7 +247,7 @@ mod test {
         let mmap = unsafe {
             MmapAppend::new(&file, true).unwrap()
         };
-        assert_eq!(mmap.len(), 32);
+        assert_eq!(mmap.len(), 8); // only 8 bytes written so far
 
         assert_eq!(mmap.get_end(), std::mem::size_of::<usize>());
 
