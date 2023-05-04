@@ -96,8 +96,7 @@ impl MmapInner {
         let result_ptr = unsafe {
             libc::mremap(
                 self.ptr, self.len, new_len,
-                0, // We don't allow it to be moved, because we can't write to self.ptr
-                  // FIXME: This may cause failures during runtime.
+                libc::MREMAP_MAYMOVE
             )
         };
 
