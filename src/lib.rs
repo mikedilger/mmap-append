@@ -11,7 +11,7 @@ use std::io::{self, Result};
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::slice;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 /// A handle to an append-only memory mapped buffer.
 ///
@@ -22,7 +22,8 @@ pub struct MmapAppend {
     append_lock: Mutex<()>,
 
     // This is the mmap. It has a usize at the beginning indicating where the end of the content lies
-    pub(crate) inner: MmapInner,
+    // It is write locked only in the case of resizing, not in the case of appending.
+    pub(crate) inner: RwLock<MmapInner>,
 }
 
 impl MmapAppend {
@@ -53,7 +54,7 @@ impl MmapAppend {
 
         Ok(MmapAppend {
             append_lock: Mutex::new(()),
-            inner: map
+            inner: RwLock::new(map)
         })
     }
 
@@ -66,17 +67,21 @@ impl MmapAppend {
         // Wait for and acquire the append lock
         let _guard = self.append_lock.lock().unwrap();
 
-        // Define a slice over the map
+        // Read lock the map
+        let inner = self.inner.read().unwrap();
+
         let u = std::mem::size_of::<usize>();
+
+        // Define a slice over the map
         let slice: &mut [u8] = unsafe {
-            &mut slice::from_raw_parts_mut(self.inner.unsafe_mut_ptr(), self.inner.len())
+            &mut slice::from_raw_parts_mut(inner.unsafe_mut_ptr(), inner.len())
         };
 
         // Read the end marker
         let mut end = usize::from_le_bytes(slice[0..u].try_into().unwrap());
 
         // Check available space
-        if end + data.len() > self.inner.len() {
+        if end + data.len() > inner.len() {
             return Err(io::Error::new(io::ErrorKind::Other, "Out of space"));
         }
 
@@ -96,50 +101,62 @@ impl MmapAppend {
     ///
     /// This may panic if the mutex is poisoned. If our code is not buggy, it will never happen.
     pub fn resize(&self, new_len: usize) -> Result<()> {
-        // Wait for and acquire the append lock
+        // Wait for and acquire the append lock (so nobody can append)
         let _guard = self.append_lock.lock().unwrap();
 
-        unsafe { self.inner.resize(new_len) }
+        // Write lock the map
+        let inner = self.inner.write().unwrap();
+
+        unsafe { inner.resize(new_len) }
     }
 
     pub fn get_end(&self) -> usize {
         let u = std::mem::size_of::<usize>();
-        let slice: &[u8] = unsafe { &slice::from_raw_parts(self.inner.ptr(), u) };
+        let inner = self.inner.read().unwrap();
+        let slice: &[u8] = unsafe { &slice::from_raw_parts(inner.ptr(), u) };
         usize::from_le_bytes(slice[0..u].try_into().unwrap())
     }
 
     pub fn flush(&self) -> Result<()> {
         let len = self.len();
-        self.inner.flush(0, len)
+        let inner = self.inner.read().unwrap();
+        inner.flush(0, len)
     }
 
     pub fn flush_async(&self) -> Result<()> {
         let len = self.len();
-        self.inner.flush_async(0, len)
+        let inner = self.inner.read().unwrap();
+        inner.flush_async(0, len)
     }
 
     pub fn flush_range(&self, offset: usize, len: usize) -> Result<()> {
-        self.inner.flush(offset, len)
+        let inner = self.inner.read().unwrap();
+        inner.flush(offset, len)
     }
 
     pub fn flush_async_range(&self, offset: usize, len: usize) -> Result<()> {
-        self.inner.flush_async(offset, len)
+        let inner = self.inner.read().unwrap();
+        inner.flush_async(offset, len)
     }
 
     pub fn advise(&self, advice: Advice) -> Result<()> {
-        self.inner.advise(advice, 0, self.inner.len())
+        let inner = self.inner.read().unwrap();
+        inner.advise(advice, 0, inner.len())
     }
 
     pub fn advise_range(&self, advice: Advice, offset: usize, len: usize) -> Result<()> {
-        self.inner.advise(advice, offset, len)
+        let inner = self.inner.read().unwrap();
+        inner.advise(advice, offset, len)
     }
 
     pub fn lock(&mut self) -> Result<()> {
-        self.inner.lock()
+        let inner = self.inner.read().unwrap();
+        inner.lock()
     }
 
     pub fn unlock(&mut self) -> Result<()> {
-        self.inner.unlock()
+        let inner = self.inner.read().unwrap();
+        inner.unlock()
     }
 }
 
@@ -151,7 +168,8 @@ impl Deref for MmapAppend {
 
     #[inline]
     fn deref(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.inner.ptr(), self.inner.len()) }
+        let inner = self.inner.read().unwrap();
+        unsafe { slice::from_raw_parts(inner.ptr(), inner.len()) }
     }
 }
 
