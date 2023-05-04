@@ -1,10 +1,9 @@
-
 mod advice;
 
 mod inner;
 
 use crate::advice::Advice;
-use crate::inner::{MmapInner, file_len};
+use crate::inner::{file_len, MmapInner};
 
 use std::fmt;
 use std::io::{self, Result};
@@ -39,6 +38,13 @@ impl MmapAppend {
     /// data to right after the end marker.
     ///
     /// There is no offset and it does not populate.
+    ///
+    /// ## Safety
+    ///
+    /// This is  `unsafe` because of the potential for *Undefined Behavior* (UB) using the map if the underlying
+    /// file is subsequently modified, in or out of process. Applications must consider the risk and take appropriate
+    /// precautions when using file-backed maps. Solutions such as file permissions, locks or process-private
+    /// (e.g. unlinked) files exist but are platform specific and limited.
     pub unsafe fn new<T: MmapAsRawDesc>(file: T, initialize: bool) -> Result<MmapAppend> {
         let u = std::mem::size_of::<usize>();
 
@@ -46,21 +52,24 @@ impl MmapAppend {
         let desc = file.as_raw_desc();
         let file_len = file_len(desc.0)?;
         if (file_len as usize) < u {
-            return Err(io::Error::new(io::ErrorKind::Other, "File not large enough."));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "File not large enough.",
+            ));
         }
 
         let mut map = MmapInner::map_mut(file_len as usize, desc.0, 0)?;
 
         if initialize {
             // write the end value to the beginning
-            let slice: &mut [u8] = unsafe { &mut slice::from_raw_parts_mut(map.mut_ptr(), u) };
+            let slice: &mut [u8] = unsafe { slice::from_raw_parts_mut(map.mut_ptr(), u) };
             slice[0..u].copy_from_slice(&u.to_le_bytes());
             map.flush(0, u)?;
         }
 
         Ok(MmapAppend {
             append_lock: Mutex::new(()),
-            inner: RwLock::new(map)
+            inner: RwLock::new(map),
         })
     }
 
@@ -70,7 +79,8 @@ impl MmapAppend {
     ///
     /// This may panic if the mutex is poisoned. If our code is not buggy, it will never happen.
     pub fn append<F>(&self, len: usize, writer: F) -> Result<()>
-    where F: FnOnce(&mut [u8])
+    where
+        F: FnOnce(&mut [u8]),
     {
         // Wait for and acquire the append lock
         let _guard = self.append_lock.lock().unwrap();
@@ -81,9 +91,8 @@ impl MmapAppend {
         let u = std::mem::size_of::<usize>();
 
         // Define a slice over the map
-        let slice: &mut [u8] = unsafe {
-            &mut slice::from_raw_parts_mut(inner.unsafe_mut_ptr(), inner.len())
-        };
+        let slice: &mut [u8] =
+            unsafe { slice::from_raw_parts_mut(inner.unsafe_mut_ptr(), inner.len()) };
 
         // Read the end marker
         let mut end = usize::from_le_bytes(slice[0..u].try_into().unwrap());
@@ -121,7 +130,7 @@ impl MmapAppend {
     pub fn get_end(&self) -> usize {
         let u = std::mem::size_of::<usize>();
         let inner = self.inner.read().unwrap();
-        let slice: &[u8] = unsafe { &slice::from_raw_parts(inner.ptr(), u) };
+        let slice: &[u8] = unsafe { slice::from_raw_parts(inner.ptr(), u) };
         usize::from_le_bytes(slice[0..u].try_into().unwrap())
     }
 
@@ -197,7 +206,6 @@ impl fmt::Debug for MmapAppend {
     }
 }
 
-
 pub struct MmapRawDescriptor(RawFd);
 
 pub trait MmapAsRawDesc {
@@ -225,7 +233,6 @@ mod test {
 
     #[test]
     fn test_mmap_append() {
-
         use std::fs::OpenOptions;
 
         let tempdir = tempfile::tempdir().unwrap();
@@ -246,34 +253,36 @@ mod test {
         }
 
         file.set_len(32 as u64).unwrap();
-        let mmap = unsafe {
-            MmapAppend::new(&file, true).unwrap()
-        };
+        let mmap = unsafe { MmapAppend::new(&file, true).unwrap() };
         assert_eq!(mmap.len(), 8); // only 8 bytes written so far
 
         assert_eq!(mmap.get_end(), std::mem::size_of::<usize>());
 
         let thirty_two_bytes: Vec<u8> = vec![
-            0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
-            16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
         ];
 
         // Not enough space
-        assert!(
-            mmap.append(thirty_two_bytes.len(),
-                        |s: &mut [u8]| s.copy_from_slice(&thirty_two_bytes)).is_err()
-        );
+        assert!(mmap
+            .append(thirty_two_bytes.len(), |s: &mut [u8]| s
+                .copy_from_slice(&thirty_two_bytes))
+            .is_err());
 
         // Resize
         mmap.resize(128).unwrap();
 
-        mmap.append(thirty_two_bytes.len(),
-                    |s: &mut [u8]| s.copy_from_slice(&thirty_two_bytes)).unwrap();
+        mmap.append(thirty_two_bytes.len(), |s: &mut [u8]| {
+            s.copy_from_slice(&thirty_two_bytes)
+        })
+        .unwrap();
 
         assert_eq!(mmap.get_end(), 32 + std::mem::size_of::<usize>());
 
-        mmap.append(thirty_two_bytes.len(),
-                    |s: &mut [u8]| s.copy_from_slice(&thirty_two_bytes)).unwrap();
+        mmap.append(thirty_two_bytes.len(), |s: &mut [u8]| {
+            s.copy_from_slice(&thirty_two_bytes)
+        })
+        .unwrap();
 
         assert_eq!(mmap.get_end(), 32 + 32 + std::mem::size_of::<usize>());
     }

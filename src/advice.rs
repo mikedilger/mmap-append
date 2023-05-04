@@ -1,4 +1,3 @@
-
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Advice {

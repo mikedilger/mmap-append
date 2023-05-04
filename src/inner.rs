@@ -1,4 +1,3 @@
-
 use std::fs::File;
 use std::mem::ManuallyDrop;
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -90,25 +89,28 @@ impl MmapInner {
         )
     }
 
+    // NOT THREAD SAFE:
     // This is unsafe because it is not thread safe and actually mutates self.
-    // Only one call at a time.
+    // We do not expose this publicly.
     pub(crate) unsafe fn resize(&self, new_len: usize) -> io::Result<()> {
         let result_ptr = unsafe {
             libc::mremap(
-                self.ptr,
-                self.len,
-                new_len,
-                0 // We don't allow it to be moved, because we can't write to self.ptr
-                // FIXME: This may cause failures during runtime.
+                self.ptr, self.len, new_len,
+                0, // We don't allow it to be moved, because we can't write to self.ptr
+                  // FIXME: This may cause failures during runtime.
             )
         };
 
         if result_ptr == libc::MAP_FAILED {
             Err(io::Error::last_os_error())
         } else {
-            let s = unsafe { &mut *(self as *const Self as *mut Self) };
-            s.ptr = result_ptr;
-            s.len = new_len;
+            // This is a little dance that makes self mutable in a way that both the
+            // compiler and 'cargo clippy' are happy with.
+            let cell = self as *const Self as *const std::cell::UnsafeCell<Self>;
+            let cell = unsafe { &*cell };
+            let r = unsafe { &mut *cell.get() };
+            r.ptr = result_ptr;
+            r.len = new_len;
             Ok(())
         }
     }
