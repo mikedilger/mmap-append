@@ -105,6 +105,10 @@ impl MmapAppend {
         // Append
         writer(&mut slice[end..end + len]);
 
+        // This is to make sure the end marker is not over-written until
+        // strictly after the append happens
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
         // Overwrite the end marker
         let newend = end + len;
         slice[0..u].copy_from_slice(&newend.to_le_bytes());
