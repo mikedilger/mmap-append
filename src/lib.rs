@@ -128,6 +128,9 @@ impl MmapAppend {
         // Write lock the map
         let inner = self.inner.write().unwrap();
 
+        // flush first
+        inner.flush(0, inner.len())?;
+
         unsafe { inner.resize(new_len) }
     }
 

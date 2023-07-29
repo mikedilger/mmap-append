@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fs::File;
 use std::mem::ManuallyDrop;
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -7,8 +8,8 @@ use std::{io, ptr};
 use crate::advice::Advice;
 
 pub struct MmapInner {
-    ptr: *mut libc::c_void,
-    len: usize,
+    ptr: Cell<*mut libc::c_void>,
+    len: Cell<usize>,
 }
 
 impl MmapInner {
@@ -72,8 +73,8 @@ impl MmapInner {
                 Err(io::Error::last_os_error())
             } else {
                 Ok(MmapInner {
-                    ptr: ptr.offset(alignment as isize),
-                    len,
+                    ptr: Cell::new(ptr.offset(alignment as isize)),
+                    len: Cell::new(len),
                 })
             }
         }
@@ -95,7 +96,7 @@ impl MmapInner {
     pub(crate) unsafe fn resize(&self, new_len: usize) -> io::Result<()> {
         let result_ptr = unsafe {
             libc::mremap(
-                self.ptr, self.len, new_len,
+                self.ptr.get(), self.len.get(), new_len,
                 libc::MREMAP_MAYMOVE
             )
         };
@@ -103,23 +104,23 @@ impl MmapInner {
         if result_ptr == libc::MAP_FAILED {
             Err(io::Error::last_os_error())
         } else {
-            // This is a little dance that makes self mutable in a way that both the
-            // compiler and 'cargo clippy' are happy with.
-            let cell = self as *const Self as *const std::cell::UnsafeCell<Self>;
-            let cell = unsafe { &*cell };
-            let r = unsafe { &mut *cell.get() };
-            r.ptr = result_ptr;
-            r.len = new_len;
+            // Interior Mutability
+            self.ptr.replace(result_ptr);
+            self.len.replace(new_len);
+
+            // Make sure no future actions happen with the old ptr & len
+            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
             Ok(())
         }
     }
 
     pub fn flush(&self, offset: usize, len: usize) -> io::Result<()> {
-        let alignment = (self.ptr as usize + offset) % page_size();
+        let alignment = (self.ptr.get() as usize + offset) % page_size();
         let offset = offset as isize - alignment as isize;
         let len = len + alignment;
         let result =
-            unsafe { libc::msync(self.ptr.offset(offset), len as libc::size_t, libc::MS_SYNC) };
+            unsafe { libc::msync(self.ptr.get().offset(offset), len as libc::size_t, libc::MS_SYNC) };
         if result == 0 {
             Ok(())
         } else {
@@ -128,11 +129,11 @@ impl MmapInner {
     }
 
     pub fn flush_async(&self, offset: usize, len: usize) -> io::Result<()> {
-        let alignment = (self.ptr as usize + offset) % page_size();
+        let alignment = (self.ptr.get() as usize + offset) % page_size();
         let offset = offset as isize - alignment as isize;
         let len = len + alignment;
         let result =
-            unsafe { libc::msync(self.ptr.offset(offset), len as libc::size_t, libc::MS_ASYNC) };
+            unsafe { libc::msync(self.ptr.get().offset(offset), len as libc::size_t, libc::MS_ASYNC) };
         if result == 0 {
             Ok(())
         } else {
@@ -142,31 +143,31 @@ impl MmapInner {
 
     #[inline]
     pub fn ptr(&self) -> *const u8 {
-        self.ptr as *const u8
+        self.ptr.get() as *const u8
     }
 
     #[inline]
     pub fn mut_ptr(&mut self) -> *mut u8 {
-        self.ptr as *mut u8
+        self.ptr.get() as *mut u8
     }
 
     #[inline]
     // this is used to write in a thread-safe way by code internal to this crate only
     pub(crate) unsafe fn unsafe_mut_ptr(&self) -> *mut u8 {
-        self.ptr as *mut u8
+        self.ptr.get() as *mut u8
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.len
+        self.len.get()
     }
 
     pub fn advise(&self, advice: Advice, offset: usize, len: usize) -> io::Result<()> {
-        let alignment = (self.ptr as usize + offset) % page_size();
+        let alignment = (self.ptr.get() as usize + offset) % page_size();
         let offset = offset as isize - alignment as isize;
         let len = len + alignment;
         unsafe {
-            if libc::madvise(self.ptr.offset(offset), len, advice as i32) != 0 {
+            if libc::madvise(self.ptr.get().offset(offset), len, advice as i32) != 0 {
                 Err(io::Error::last_os_error())
             } else {
                 Ok(())
@@ -176,7 +177,7 @@ impl MmapInner {
 
     pub fn lock(&self) -> io::Result<()> {
         unsafe {
-            if libc::mlock(self.ptr, self.len) != 0 {
+            if libc::mlock(self.ptr.get(), self.len.get()) != 0 {
                 Err(io::Error::last_os_error())
             } else {
                 Ok(())
@@ -186,7 +187,7 @@ impl MmapInner {
 
     pub fn unlock(&self) -> io::Result<()> {
         unsafe {
-            if libc::munlock(self.ptr, self.len) != 0 {
+            if libc::munlock(self.ptr.get(), self.len.get()) != 0 {
                 Err(io::Error::last_os_error())
             } else {
                 Ok(())
@@ -197,14 +198,14 @@ impl MmapInner {
 
 impl Drop for MmapInner {
     fn drop(&mut self) {
-        let alignment = self.ptr as usize % page_size();
-        let len = self.len + alignment;
+        let alignment = self.ptr.get() as usize % page_size();
+        let len = self.len.get() + alignment;
         let len = len.max(1);
         // Any errors during unmapping/closing are ignored as the only way
         // to report them would be through panicking which is highly discouraged
         // in Drop impls, c.f. https://github.com/rust-lang/lang-team/issues/97
         unsafe {
-            let ptr = self.ptr.offset(-(alignment as isize));
+            let ptr = self.ptr.get().offset(-(alignment as isize));
             libc::munmap(ptr, len as libc::size_t);
         }
     }
