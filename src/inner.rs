@@ -21,11 +21,11 @@ impl MmapInner {
         prot: libc::c_int,
         flags: libc::c_int,
         file: RawFd,
-        offset: u64,
+        offset: usize,
     ) -> io::Result<MmapInner> {
-        let alignment = offset % page_size() as u64;
+        let alignment = offset % page_size();
         let aligned_offset = offset - alignment;
-        let aligned_len = len + alignment as usize;
+        let aligned_len = len + alignment;
 
         // `libc::mmap` does not support zero-size mappings. POSIX defines:
         //
@@ -73,14 +73,14 @@ impl MmapInner {
                 Err(io::Error::last_os_error())
             } else {
                 Ok(MmapInner {
-                    ptr: Cell::new(ptr.offset(alignment as isize)),
+                    ptr: Cell::new(ptr.add(alignment)),
                     len: Cell::new(len),
                 })
             }
         }
     }
 
-    pub fn map_mut(len: usize, file: RawFd, offset: u64) -> io::Result<MmapInner> {
+    pub fn map_mut(len: usize, file: RawFd, offset: usize) -> io::Result<MmapInner> {
         MmapInner::new(
             len,
             libc::PROT_READ | libc::PROT_WRITE,
@@ -96,8 +96,10 @@ impl MmapInner {
     pub(crate) unsafe fn resize(&self, new_len: usize) -> io::Result<()> {
         let result_ptr = unsafe {
             libc::mremap(
-                self.ptr.get(), self.len.get(), new_len,
-                libc::MREMAP_MAYMOVE
+                self.ptr.get(),
+                self.len.get(),
+                new_len,
+                libc::MREMAP_MAYMOVE,
             )
         };
 
@@ -119,8 +121,13 @@ impl MmapInner {
         let alignment = (self.ptr.get() as usize + offset) % page_size();
         let offset = offset as isize - alignment as isize;
         let len = len + alignment;
-        let result =
-            unsafe { libc::msync(self.ptr.get().offset(offset), len as libc::size_t, libc::MS_SYNC) };
+        let result = unsafe {
+            libc::msync(
+                self.ptr.get().offset(offset),
+                len as libc::size_t,
+                libc::MS_SYNC,
+            )
+        };
         if result == 0 {
             Ok(())
         } else {
@@ -132,8 +139,13 @@ impl MmapInner {
         let alignment = (self.ptr.get() as usize + offset) % page_size();
         let offset = offset as isize - alignment as isize;
         let len = len + alignment;
-        let result =
-            unsafe { libc::msync(self.ptr.get().offset(offset), len as libc::size_t, libc::MS_ASYNC) };
+        let result = unsafe {
+            libc::msync(
+                self.ptr.get().offset(offset),
+                len as libc::size_t,
+                libc::MS_ASYNC,
+            )
+        };
         if result == 0 {
             Ok(())
         } else {
