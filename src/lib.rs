@@ -44,6 +44,8 @@ fn remap(fd: RawFd, inner: &mut MmapRaw, new_len: usize) -> Result<()> {
     Ok(())
 }
 
+pub const HEADER_SIZE: usize = std::mem::size_of::<usize>();
+
 impl MmapAppend {
     /// Creates Mmaps the `file` returning an MmapAppend object. The entire file will be mapped.
     ///
@@ -59,14 +61,12 @@ impl MmapAppend {
     /// precautions when using file-backed maps. Solutions such as file permissions, locks or process-private
     /// (e.g. unlinked) files exist but are platform specific and limited.
     pub unsafe fn new<T: MmapAsRawDesc>(file: T, initialize: bool) -> Result<MmapAppend> {
-        let u = std::mem::size_of::<usize>();
-
         // File must be long enough for a usize 'end' record at the front
         let fd = file.as_raw_desc().0;
 
         // Will automatically look up the file length
         let map = MmapRaw::map_raw(fd)?;
-        if map.len() < u {
+        if map.len() < HEADER_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "File not large enough.",
@@ -75,9 +75,10 @@ impl MmapAppend {
 
         if initialize {
             // write the end value to the beginning
-            let slice: &mut [u8] = unsafe { slice::from_raw_parts_mut(map.as_mut_ptr(), u) };
-            slice[0..u].copy_from_slice(&u.to_le_bytes());
-            map.flush_range(0, u)?;
+            let slice: &mut [u8] =
+                unsafe { slice::from_raw_parts_mut(map.as_mut_ptr(), HEADER_SIZE) };
+            slice[0..HEADER_SIZE].copy_from_slice(&HEADER_SIZE.to_le_bytes());
+            map.flush_range(0, HEADER_SIZE)?;
         }
 
         Ok(MmapAppend {
@@ -102,14 +103,12 @@ impl MmapAppend {
         // Read lock the map
         let inner = self.inner.read().unwrap();
 
-        let u = std::mem::size_of::<usize>();
-
         // Define a slice over the map
         let slice: &mut [u8] =
             unsafe { slice::from_raw_parts_mut(inner.as_mut_ptr(), inner.len()) };
 
         // Read the end marker
-        let end = usize::from_le_bytes(slice[0..u].try_into().unwrap());
+        let end = usize::from_le_bytes(slice[0..HEADER_SIZE].try_into().unwrap());
 
         // Check available space
         if end + len > inner.len() {
@@ -125,7 +124,7 @@ impl MmapAppend {
 
         // Overwrite the end marker
         let newend = end + len;
-        slice[0..u].copy_from_slice(&newend.to_le_bytes());
+        slice[0..HEADER_SIZE].copy_from_slice(&newend.to_le_bytes());
 
         Ok(end)
     }
@@ -149,10 +148,9 @@ impl MmapAppend {
     }
 
     pub fn get_end(&self) -> usize {
-        let u = std::mem::size_of::<usize>();
         let inner = self.inner.read().unwrap();
-        let slice: &[u8] = unsafe { slice::from_raw_parts(inner.as_ptr(), u) };
-        usize::from_le_bytes(slice[0..u].try_into().unwrap())
+        let slice: &[u8] = unsafe { slice::from_raw_parts(inner.as_ptr(), HEADER_SIZE) };
+        usize::from_le_bytes(slice[0..HEADER_SIZE].try_into().unwrap())
     }
 
     pub fn flush(&self) -> Result<()> {
@@ -277,7 +275,7 @@ mod test {
         let mmap = unsafe { MmapAppend::new(&file, true).unwrap() };
         assert_eq!(mmap.len(), 8); // only 8 bytes written so far
 
-        assert_eq!(mmap.get_end(), std::mem::size_of::<usize>());
+        assert_eq!(mmap.get_end(), HEADER_SIZE);
 
         let thirty_two_bytes: Vec<u8> = vec![
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
@@ -298,13 +296,13 @@ mod test {
         })
         .unwrap();
 
-        assert_eq!(mmap.get_end(), 32 + std::mem::size_of::<usize>());
+        assert_eq!(mmap.get_end(), 32 + HEADER_SIZE);
 
         mmap.append(thirty_two_bytes.len(), |s: &mut [u8]| {
             s.copy_from_slice(&thirty_two_bytes)
         })
         .unwrap();
 
-        assert_eq!(mmap.get_end(), 32 + 32 + std::mem::size_of::<usize>());
+        assert_eq!(mmap.get_end(), 32 + 32 + HEADER_SIZE);
     }
 }
