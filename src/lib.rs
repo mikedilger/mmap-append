@@ -61,11 +61,10 @@ impl MmapAppend {
     /// precautions when using file-backed maps. Solutions such as file permissions, locks or process-private
     /// (e.g. unlinked) files exist but are platform specific and limited.
     pub unsafe fn new<T: MmapAsRawDesc>(file: T, initialize: bool) -> Result<MmapAppend> {
-        // File must be long enough for a usize 'end' record at the front
         let fd = file.as_raw_desc().0;
-
         // Will automatically look up the file length
         let map = MmapRaw::map_raw(fd)?;
+        // File must be long enough for a usize 'end' record at the front
         if map.len() < HEADER_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
