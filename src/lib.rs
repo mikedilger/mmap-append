@@ -25,6 +25,9 @@ pub struct MmapAppend {
     // Only one writer may append at a time.
     append_lock: Mutex<()>,
 
+    // Needed for remap workaround
+    desc: MmapRawDescriptor,
+
     // This is the mmap. It has a usize at the beginning indicating where the end of the content lies
     // It is write locked only in the case of resizing, not in the case of appending.
     pub(crate) inner: RwLock<MmapRaw>,
@@ -40,8 +43,19 @@ fn file_len(file: RawFd) -> io::Result<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn remap(inner: &mut MmapRaw, new_len: usize) -> Result<()> {
+fn remap(_fd: RawFd, inner: &mut MmapRaw, new_len: usize) -> Result<()> {
     unsafe { inner.remap(new_len, memmap2::RemapOptions::new().may_move(true)) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn remap(fd: RawFd, inner: &mut MmapRaw, new_len: usize) -> Result<()> {
+    inner.flush()?;
+    let map = memmap2::MmapOptions::new()
+        .len(new_len as usize)
+        .map_raw(fd)?;
+    // Drop the old map after making a new map
+    let _ = std::mem::replace(inner, map);
+    Ok(())
 }
 
 impl MmapAppend {
@@ -85,6 +99,7 @@ impl MmapAppend {
         Ok(MmapAppend {
             append_lock: Mutex::new(()),
             inner: RwLock::new(map),
+            desc,
         })
     }
 
@@ -146,7 +161,7 @@ impl MmapAppend {
         // flush first
         inner.flush_range(0, inner.len())?;
 
-        remap(&mut inner, new_len)
+        remap(self.desc.0, &mut inner, new_len)
     }
 
     pub fn get_end(&self) -> usize {
