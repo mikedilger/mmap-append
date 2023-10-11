@@ -2,11 +2,8 @@ pub use memmap2;
 use memmap2::{Advice, MmapRaw};
 
 use std::fmt;
-use std::fs::File;
 use std::io::{self, Result};
-use std::mem::ManuallyDrop;
 use std::ops::Deref;
-use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::slice;
 use std::sync::{Mutex, RwLock};
@@ -26,20 +23,11 @@ pub struct MmapAppend {
     append_lock: Mutex<()>,
 
     // Needed for remap workaround
-    desc: MmapRawDescriptor,
+    fd: RawFd,
 
     // This is the mmap. It has a usize at the beginning indicating where the end of the content lies
     // It is write locked only in the case of resizing, not in the case of appending.
     pub(crate) inner: RwLock<MmapRaw>,
-}
-
-fn file_len(file: RawFd) -> io::Result<u64> {
-    // SAFETY: We must not close the passed-in fd by dropping the File we create,
-    // we ensure this by immediately wrapping it in a ManuallyDrop.
-    unsafe {
-        let file = ManuallyDrop::new(File::from_raw_fd(file));
-        Ok(file.metadata()?.len())
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -50,9 +38,7 @@ fn remap(_fd: RawFd, inner: &mut MmapRaw, new_len: usize) -> Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn remap(fd: RawFd, inner: &mut MmapRaw, new_len: usize) -> Result<()> {
     inner.flush()?;
-    let map = memmap2::MmapOptions::new()
-        .len(new_len as usize)
-        .map_raw(fd)?;
+    let map = memmap2::MmapOptions::new().len(new_len).map_raw(fd)?;
     // Drop the old map after making a new map
     let _ = std::mem::replace(inner, map);
     Ok(())
@@ -76,18 +62,16 @@ impl MmapAppend {
         let u = std::mem::size_of::<usize>();
 
         // File must be long enough for a usize 'end' record at the front
-        let desc = file.as_raw_desc();
-        let file_len = file_len(desc.0)?;
-        if (file_len as usize) < u {
+        let fd = file.as_raw_desc().0;
+
+        // Will automatically look up the file length
+        let map = MmapRaw::map_raw(fd)?;
+        if map.len() < u {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "File not large enough.",
             ));
         }
-
-        let map = memmap2::MmapOptions::new()
-            .len(file_len as usize)
-            .map_raw(desc.0)?;
 
         if initialize {
             // write the end value to the beginning
@@ -99,7 +83,7 @@ impl MmapAppend {
         Ok(MmapAppend {
             append_lock: Mutex::new(()),
             inner: RwLock::new(map),
-            desc,
+            fd,
         })
     }
 
@@ -161,7 +145,7 @@ impl MmapAppend {
         // flush first
         inner.flush_range(0, inner.len())?;
 
-        remap(self.desc.0, &mut inner, new_len)
+        remap(self.fd, &mut inner, new_len)
     }
 
     pub fn get_end(&self) -> usize {
