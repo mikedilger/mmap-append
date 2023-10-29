@@ -87,14 +87,15 @@ impl MmapAppend {
         })
     }
 
-    /// Append data.
+    /// Append data. `writer` should write up to max_len bytes and then return the number
+    /// of bytes actually written, or an error.
     ///
-    /// This will return an error if there is not enough space.
+    /// This will return an error if there is not enough space, or if the writer errors.
     ///
     /// This may panic if the mutex is poisoned. If our code is not buggy, it will never happen.
-    pub fn append<F>(&self, len: usize, writer: F) -> Result<usize>
+    pub fn append<F>(&self, max_len: usize, writer: F) -> Result<usize>
     where
-        F: FnOnce(&mut [u8]),
+        F: FnOnce(&mut [u8]) -> Result<usize>,
     {
         // Wait for and acquire the append lock
         let _guard = self.append_lock.lock().unwrap();
@@ -110,12 +111,12 @@ impl MmapAppend {
         let end = usize::from_le_bytes(slice[0..HEADER_SIZE].try_into().unwrap());
 
         // Check available space
-        if end + len > inner.len() {
+        if end + max_len > inner.len() {
             return Err(io::Error::new(io::ErrorKind::Other, "Out of space"));
         }
 
         // Append
-        writer(&mut slice[end..end + len]);
+        let len = writer(&mut slice[end..end + max_len])?;
 
         // This is to make sure the end marker is not over-written until
         // strictly after the append happens
@@ -283,22 +284,26 @@ mod test {
 
         // Not enough space
         assert!(mmap
-            .append(thirty_two_bytes.len(), |s: &mut [u8]| s
-                .copy_from_slice(&thirty_two_bytes))
+            .append(thirty_two_bytes.len(), |s: &mut [u8]| {
+                s.copy_from_slice(&thirty_two_bytes);
+                Ok(thirty_two_bytes.len())
+            })
             .is_err());
 
         // Resize
         mmap.resize(128).unwrap();
 
-        mmap.append(thirty_two_bytes.len(), |s: &mut [u8]| {
-            s.copy_from_slice(&thirty_two_bytes)
+        mmap.append(thirty_two_bytes.len(), |s: &mut [u8]| -> Result<usize> {
+            s.copy_from_slice(&thirty_two_bytes);
+            Ok(thirty_two_bytes.len())
         })
         .unwrap();
 
         assert_eq!(mmap.get_end(), 32 + HEADER_SIZE);
 
-        mmap.append(thirty_two_bytes.len(), |s: &mut [u8]| {
-            s.copy_from_slice(&thirty_two_bytes)
+        mmap.append(thirty_two_bytes.len(), |s: &mut [u8]| -> Result<usize> {
+            s.copy_from_slice(&thirty_two_bytes);
+            Ok(thirty_two_bytes.len())
         })
         .unwrap();
 
