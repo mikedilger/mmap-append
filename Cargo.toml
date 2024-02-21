@@ -1,6 +1,6 @@
 [package]
 name = "mmap-append"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Mike Dilger <mike@mikedilger.com>"]
 description = "Append-only memory-mapped I/O, resizable, with low lock contention"
 repository = "https://github.com/mikedilger/mmap-append"
